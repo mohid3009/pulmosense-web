@@ -1,8 +1,9 @@
-import { DEFAULT_URL, FLUSH_MS, SENSORS, STALE_MS, summarizeCapture } from '../config'
+import { captureLevel, DEFAULT_URL, FLUSH_MS, SENSORS, STALE_MS, summarizeCapture, type Level } from '../config'
 import { isReboot, parseFrame, type Volts } from '../parse/parse'
 import { SimSource } from '../sources/sim'
 import type { ConnStatus, DataSource } from '../sources/source'
 import { WsSource } from '../sources/ws'
+import { hashPassword, newSalt } from './auth'
 import * as db from './db'
 import { emptySeries, lastBaseline, pushEvent, pushReading, type Event, type Reading } from './series'
 
@@ -30,12 +31,14 @@ class Store {
   notice = ''
   device = { state: '', warmupLeft: 0, warmupTotal: 0 }
   toast = { id: 0, text: '' }
-  result: { n: number; text: string } | null = null // capture result popup
+  result: { n: number; text: string; level: Level; ratios: number[] } | null = null // capture result popup
   last: Reading | null = null
   live = emptySeries()
   log: { t: number; text: string }[] = []
   rec: Recording | null = null
   sessions: db.SessionMeta[] = []
+  user: db.User | null = null
+  userReady = false // false until the saved login has been looked up, so the login form does not flash
 
   private listeners = new Set<() => void>()
   private src: DataSource | null = null
@@ -52,7 +55,91 @@ class Store {
     }, 500)
     setInterval(() => void this.flush(), FLUSH_MS)
     document.addEventListener('visibilitychange', () => document.hidden && void this.flush())
-    void this.refreshSessions()
+    void this.restoreUser()
+  }
+
+  private async restoreUser() {
+    const id = Number(pref('userId'))
+    // No login screen: everything lives under one local profile.
+    this.user = (id && (await db.getUser(id))) || (await db.findUser('Me')) || null
+    if (!this.user) {
+      this.user = await db.addUser({ name: 'Me', key: 'me', salt: '', hash: '', devices: [] })
+      await db.adoptOrphans(this.user.id)
+    }
+    savePref('userId', String(this.user.id))
+    this.userReady = true
+    await this.refreshSessions()
+  }
+
+  /** Returns an error message, or '' on success. */
+  async signUp(name: string, password: string) {
+    name = name.trim()
+    if (!name) return 'Enter a name.'
+    if (password.length < 4) return 'Use a password of at least 4 characters.'
+    if (await db.findUser(name)) return 'That name is already taken on this laptop.'
+    try {
+      const salt = newSalt()
+      const first = (await db.userCount()) === 0
+      const user = await db.addUser({ name, key: name.toLowerCase(), salt, hash: await hashPassword(password, salt), devices: [] })
+      if (first) await db.adoptOrphans(user.id)
+      await this.enter(user)
+      return ''
+    } catch (e) {
+      return (e as Error).message
+    }
+  }
+
+  async logIn(name: string, password: string) {
+    try {
+      const user = await db.findUser(name)
+      if (!user || user.hash !== (await hashPassword(password, user.salt))) return 'Wrong name or password.'
+      await this.enter(user)
+      return ''
+    } catch (e) {
+      return (e as Error).message
+    }
+  }
+
+  private async enter(user: db.User) {
+    savePref('userId', String(user.id))
+    this.user = user
+    await this.refreshSessions()
+  }
+
+  async logOut() {
+    await this.stopRecording()
+    this.disconnect()
+    this.live = emptySeries()
+    this.last = null
+    this.device = { state: '', warmupLeft: 0, warmupTotal: 0 }
+    this.prevMs = null
+    this.user = null
+    savePref('userId', '')
+    await this.refreshSessions()
+  }
+
+  /** Saved devices live on the user record. */
+  private async saveDevices(devices: db.Device[]) {
+    if (!this.user) return
+    this.user = { ...this.user, devices }
+    await db.putUser(this.user)
+    this.bump()
+  }
+
+  addDevice(name: string, url: string) {
+    name = name.trim()
+    url = url.trim()
+    if (!this.user || !name || !url) return
+    return this.saveDevices([...this.user.devices.filter((d) => d.url !== url), { id: crypto.randomUUID(), name, url }])
+  }
+
+  removeDevice(id: string) {
+    return this.saveDevices((this.user?.devices ?? []).filter((d) => d.id !== id))
+  }
+
+  /** Name of the saved device the current address belongs to, if any. */
+  get deviceName() {
+    return this.user?.devices.find((d) => d.url === this.url.trim())?.name
   }
 
   subscribe = (fn: () => void) => {
@@ -138,6 +225,28 @@ class Store {
     this.bump()
   }
 
+  private announceReady() {
+    const text = 'Ready to capture. Breathe gently toward the sensors, then press Start capture.'
+    this.addLog('Device is ready to capture')
+    this.notify(text)
+    try { // short two note chime; browsers allow it because the user already clicked Connect
+      const ctx = new AudioContext()
+      ;[660, 880].forEach((hz, i) => {
+        const o = ctx.createOscillator()
+        const g = ctx.createGain()
+        o.frequency.value = hz
+        g.gain.setValueAtTime(0.0001, ctx.currentTime + i * 0.18)
+        g.gain.exponentialRampToValueAtTime(0.15, ctx.currentTime + i * 0.18 + 0.03)
+        g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + i * 0.18 + 0.2)
+        o.connect(g).connect(ctx.destination)
+        o.start(ctx.currentTime + i * 0.18)
+        o.stop(ctx.currentTime + i * 0.18 + 0.22)
+      })
+      setTimeout(() => void ctx.close(), 800)
+    } catch { /* no audio available */ }
+    if (document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') new Notification('PulmoSense is ready', { body: text })
+  }
+
   /** Same as pressing the device button. Older firmware ignores the command, so say so if nothing happens. */
   requestCapture() {
     if (!this.src || this.device.state !== 'ready') return
@@ -193,6 +302,8 @@ class Store {
       }
       this.prevMs = m.ms
       if (m.state === 'capturing' && this.device.state !== 'capturing') this.addEvent({ t: now, kind: 'capture_start' })
+      // Warm-up and baseline are done: tell the user it is time to breathe.
+      if (m.state === 'ready' && (this.device.state === 'warmup' || this.device.state === 'baseline')) this.announceReady()
       // The device only sends seconds left, so the longest countdown seen stands in for the total.
       const warming = m.state === 'warmup'
       const warmupTotal = warming && this.device.state === 'warmup' ? Math.max(this.device.warmupTotal, m.warmupLeft) : warming ? m.warmupLeft : 0
@@ -215,7 +326,9 @@ class Store {
     } else {
       this.addEvent({ t: now, kind: 'capture', n: m.n, v: pick(m), ratio: m.ratio })
       this.addLog(`Capture ${m.n} received`)
-      this.result = { n: m.n, text: summarizeCapture(SENSORS.map((k) => m.ratio[k])) }
+      const ratios = SENSORS.map((k) => m.ratio[k])
+      const volts = SENSORS.map((k) => m[k])
+      this.result = { n: m.n, text: summarizeCapture(ratios, volts), level: captureLevel(ratios, volts), ratios }
     }
     this.bump()
   }
@@ -223,7 +336,10 @@ class Store {
   async startRecording() {
     if (this.rec) return
     const start = Date.now()
-    const draft = { name: `Session ${new Date(start).toLocaleString()}`, start, end: start, source: this.src?.kind ?? 'device' }
+    const draft = {
+      name: `Session ${new Date(start).toLocaleString()}`, start, end: start, source: this.src?.kind ?? 'device',
+      userId: this.user?.id, deviceName: this.src?.kind === 'simulated' ? undefined : this.deviceName,
+    }
     const rec: Recording = { meta: { ...draft, id: 0 }, readings: [], events: [], count: 0 }
     const b = lastBaseline(this.live.events)
     if (b) rec.events.push({ ...b, t: start }) // so the session carries its baseline
@@ -275,7 +391,8 @@ class Store {
   }
 
   async refreshSessions() {
-    this.sessions = (await db.listSessions()).reverse()
+    const uid = this.user?.id
+    this.sessions = (await db.listSessions()).filter((m) => m.userId === uid).reverse()
     this.bump()
   }
 }

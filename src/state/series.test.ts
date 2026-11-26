@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { describeRatio } from '../config'
+import { captureLevel, describeRatio, estimatePpm } from '../config'
 import { readingsCsv } from './csv'
 import { baselineSegs, captureSpans, lastBaseline, seriesFrom, type Event, type Reading } from './series'
 
@@ -53,4 +53,23 @@ it('descriptor bins, including the firmware 0 ratio when baseline is near 0 V', 
   expect([0.5, 0.9, 1.1, 1.2, 0].map(describeRatio)).toEqual([
     'Below baseline', 'Near baseline', 'Near baseline', 'Above baseline', 'No ratio (baseline near 0 V)',
   ])
+})
+
+it('capture level follows the largest ratio across sensors', () => {
+  const big = [1, 1, 1] // volts large enough that every ratio change clears the noise floor
+  expect([[1, 1, 1], [0.8, 1.1, 1], [1, 1.2, 1], [1, 1, 1.4], [1.7, 1.7, 1], [1.6, 1, 1]].map((r) => captureLevel(r, big))).toEqual([0, 0, 1, 2, 3, 2])
+})
+
+it('ppm estimate is the clean-air value at baseline, rises with voltage, and is null when impossible', () => {
+  const base = estimatePpm('mq135', 1, 1)! // 102.2 * 3.6^-2.473
+  expect(base).toBeCloseTo(4.4, 0)
+  expect(estimatePpm('mq135', 1.5, 1.5)!).toBeGreaterThan(base)
+  expect(estimatePpm('mq7', 5.2, 1)).toBeNull() // at or above the supply
+  expect(estimatePpm('mq3', 1, 0)).toBeNull() // firmware sends ratio 0 when the baseline is near 0 V
+})
+
+it('ignores movement under the noise floor and needs two sensors for the top level', () => {
+  expect(captureLevel([2, 1, 1], [0.05, 1, 1])).toBe(0) // 0.025 V change on a tiny baseline is noise
+  expect(captureLevel([2, 1, 1], [1, 1, 1])).toBe(2) // one sensor alone tops out at noticeably
+  expect(captureLevel([2, 1.8, 1], [1, 1, 1])).toBe(3)
 })
