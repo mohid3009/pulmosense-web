@@ -1,15 +1,18 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { CAPTURE_S, SENSORS, SENSOR_HINT, SENSOR_LABEL } from '../config'
+import { CAPTURE_S, estimatePpm, fmtPpm, PPM_GAS, SENSORS, SENSOR_HINT, SENSOR_LABEL } from '../config'
 import { capturesCsv, download, readingsCsv } from '../state/csv'
 import * as db from '../state/db'
 import { captures, lastBaseline, seriesFrom, type Series } from '../state/series'
 import { store } from '../state/store'
+import { History, Settings } from './Account'
 import { Chart, type Win } from './Chart'
 import { clock, mmss } from './format'
+import { Landing } from './Landing'
+import { Result } from './Result'
 import { CaptureTable, CompareChart, SessionList } from './Tables'
 
-const WINDOWS: [Win, string][] = [[60, '1 min'], [300, '5 min'], [900, '15 min'], [0, 'All']]
-const CONN_LABEL = { disconnected: 'Disconnected', connecting: 'Connecting', connected: 'Connected' }
+const WINDOWS: [Win, string][] = [[10, '10 s'], [30, '30 s'], [60, '1 min'], [300, '5 min'], [900, '15 min'], [0, 'All']]
+const CONN_LABEL = { disconnected: 'Not connected', connecting: 'Connecting…', connected: 'Connected' }
 const STEPS: [string, string][] = [['warmup', 'Warming up'], ['baseline', 'Baseline'], ['ready', 'Ready'], ['capturing', 'Capturing']]
 const LUNG_ACTIVITIES = [
   ['breath', 'Breathing practice', '5 calm minutes'],
@@ -17,8 +20,7 @@ const LUNG_ACTIVITIES = [
   ['air', 'Fresh-air pause', 'Step outside'],
   ['water', 'Hydration check', 'Drink some water'],
 ] as const
-const FAMILY_MEMBERS = ['Ronaldo', 'Messi', 'Verstappen', 'Hamilton', 'Mohid'] as const
-type FamilyMember = typeof FAMILY_MEMBERS[number]
+type FamilyMember = 'Mohid'
 const PULMO_TWIN = {
   status: 'Stable baseline',
   score: 82,
@@ -35,10 +37,6 @@ const WEEK_SPRINTS = [
   { label: 'Past sprint', range: 'Sep 13 - Sep 19, 2026', days: [['sep-13', 'Sun 13', 74], ['sep-14', 'Mon 14', 79], ['sep-15', 'Tue 15', 77], ['sep-16', 'Wed 16', 82], ['sep-17', 'Thu 17', 88], ['sep-18', 'Fri 18', 80], ['sep-19', 'Sat 19', 85]] },
 ] as const
 const FAMILY_SCORES: Record<FamilyMember, number[]> = {
-  Ronaldo: [86, 91, 88, 94, 89, 82, 87],
-  Messi: [78, 82, 80, 85, 88, 84, 81],
-  Verstappen: [72, 76, 81, 79, 86, 91, 88],
-  Hamilton: [84, 79, 87, 90, 92, 86, 89],
   Mohid: [80, 84, 82, 88, 91, 86, 90],
 }
 const FAMILY_PROFILES: Record<FamilyMember, {
@@ -52,10 +50,6 @@ const FAMILY_PROFILES: Record<FamilyMember, {
   insight: string
   trend: number[]
 }> = {
-  Ronaldo: { status: 'Strong baseline', score: 89, consistency: '86%', recovery: '7h 18m', exposure: 'Low', confidence: '91%', forecast: 'Maintaining your current rhythm should support a strong week ahead.', insight: 'Your most consistent days follow an early movement routine.', trend: [76, 80, 79, 85, 83, 88, 89] },
-  Messi: { status: 'Steady baseline', score: 83, consistency: '78%', recovery: '6h 52m', exposure: 'Low', confidence: '87%', forecast: 'A little more consistency in recovery could lift your next seven-day score.', insight: 'Short breathing pauses are your most reliable positive signal.', trend: [72, 76, 75, 78, 80, 82, 83] },
-  Verstappen: { status: 'Building baseline', score: 81, consistency: '74%', recovery: '6h 31m', exposure: 'Moderate', confidence: '84%', forecast: 'Reducing late-day exposure and protecting recovery time may improve stability.', insight: 'Your strongest readings follow lower-intensity recovery days.', trend: [68, 71, 76, 73, 79, 80, 81] },
-  Hamilton: { status: 'Balanced baseline', score: 87, consistency: '82%', recovery: '7h 04m', exposure: 'Low', confidence: '89%', forecast: 'Your current pattern is trending steadily with room for small gains.', insight: 'Hydration and a regular wind-down are reinforcing your rhythm.', trend: [74, 78, 81, 80, 84, 85, 87] },
   Mohid: { status: 'Improving baseline', score: 86, consistency: '80%', recovery: '6h 48m', exposure: 'Low', confidence: '88%', forecast: 'Your recent consistency points toward a stronger and more stable week ahead.', insight: 'Your best pattern appears when movement and recovery stay balanced.', trend: [71, 75, 78, 80, 82, 84, 86] },
 }
 const DAY_TASKS = [
@@ -85,6 +79,17 @@ function usePref<T>(key: string, init: T) {
     try { localStorage.setItem(key, JSON.stringify(x)) } catch { /* private mode */ }
   }
   return [v, set] as const
+}
+
+/** The landing page is the front door; the dashboard lives at #app. Other hashes are landing page anchors. */
+function useOnDashboard() {
+  const [on, setOn] = useState(() => location.hash === '#app')
+  useEffect(() => {
+    const f = () => { setOn(location.hash === '#app'); if (location.hash === '#app') scrollTo(0, 0) }
+    addEventListener('hashchange', f)
+    return () => removeEventListener('hashchange', f)
+  }, [])
+  return on
 }
 
 function useDark() {
@@ -127,7 +132,8 @@ function Journey({ demo }: { demo: boolean }) {
     msg = `Device state: ${state}`
   }
   return (
-    <section className="card journey" aria-label="Device progress">
+    <section className={`card journey st-${state}`} aria-label="Device progress">
+      <p className="journey-status" role="status"><i />{state === 'ready' ? 'Ready to capture' : state === 'capturing' ? 'Capturing' : 'Not ready yet'}</p>
       <ol className="steps">
         {STEPS.map(([k, l], i) => (
           <li key={k} className={i === idx ? 'now' : idx > i ? 'done' : undefined}>
@@ -163,14 +169,14 @@ function Journey({ demo }: { demo: boolean }) {
   )
 }
 
-function Onboarding() {
+function Onboarding({ onSettings }: { onSettings: () => void }) {
   const s = store
   if (s.conn === 'connecting')
     return (
       <div className="onboard">
         <div>
           <h3><span className="pulse" /> Looking for the device</h3>
-          <p>Trying {s.url}. Make sure this laptop is on the same WiFi as the device and the address matches the IP on the device screen.</p>
+          <p>Trying {s.url}. Make sure this laptop is on the same WiFi as the device. Wrong address? <button className="link" onClick={onSettings}>Open Settings</button></p>
         </div>
       </div>
     )
@@ -184,11 +190,11 @@ function Onboarding() {
     <div className="onboard">
       <div>
         <h3>Let's get connected</h3>
-        <p className="muted">Not connected. Get on the same WiFi as the device, then press Connect, or turn on demo mode.</p>
+        <p className="muted">Three quick steps, then press Connect. No device handy? Try demo mode.</p>
         <ol className="howto">
           <li><span><b>Switch on</b> the PulmoSense device. Its screen shows <b>WAITING</b> with a WiFi name and IP.</span></li>
           <li><span><b>Join that WiFi</b> on this laptop. If it says PulmoSense, the password is pulmosense1.</span></li>
-          <li><span><b>Enter ws://&lt;IP&gt;:81</b> at the top (192.168.4.1 on the PulmoSense network) and press Connect.</span></li>
+          <li><span><b>Enter the address</b> in <button className="link" onClick={onSettings}>Settings</button> as ws://&lt;IP&gt;:81 (192.168.4.1 on the PulmoSense network), then press Connect.</span></li>
         </ol>
         <div className="or"><span>no device handy?</span></div>
         <button className="primary" onClick={() => void s.setDemo(true)}>Try demo mode</button>
@@ -198,7 +204,7 @@ function Onboarding() {
 }
 
 function Pulmoverse({ onBack }: { onBack: () => void }) {
-  const [member, setMember] = usePref<FamilyMember>('pulmoverse-family-member', 'Ronaldo')
+  const member: FamilyMember = 'Mohid' // the only profile
   const [familyDone, setFamilyDone] = usePref<Record<FamilyMember, Record<string, boolean>>>('pulmoverse-family-activities', {} as Record<FamilyMember, Record<string, boolean>>)
   const [view, setView] = useState<'overview' | 'forecast'>('overview')
   const [selectedDate, setSelectedDate] = useState({ key: 'oct-8', label: 'October 8, 2026', score: 88 })
@@ -229,10 +235,6 @@ function Pulmoverse({ onBack }: { onBack: () => void }) {
         <button className="verse-back" onClick={onBack} aria-label="Back to PulmoSense">← Back to PulmoSense</button>
         <span className="verse-mark">PULMO<span>VERSE</span></span>
       </div>
-      <nav className="family-switcher" aria-label="Family members">
-        <span>Family health</span>
-        {FAMILY_MEMBERS.map((name) => <button key={name} className={member === name ? 'selected' : ''} onClick={() => { setMember(name); setDayFocus(false); setSelectedDate({ key: 'current', label: 'Today', score: FAMILY_SCORES[name][4] }) }}>{name}</button>)}
-      </nav>
       <section className="twin-card">
         <div className="twin-card-heading">
           <div>
@@ -350,11 +352,14 @@ function Pulmoverse({ onBack }: { onBack: () => void }) {
 export function App() {
   useSyncExternalStore(store.subscribe, store.getVersion)
   const s = store
-  const [win, setWin] = usePref<Win>('win', 300)
-  const [autoY, setAutoY] = usePref('autoY', false)
+  const [win, setWin] = usePref<Win>('win', 30)
+  const [autoY, setAutoY] = usePref('autoY', true)
   const [paused, setPaused] = useState(false)
   const [viewing, setViewing] = useState<{ meta: db.SessionMeta; series: Series } | null>(null)
   const [inPulmoverse, setInPulmoverse] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [tab, setTab] = useState<'live' | 'records'>('live')
+  const onDashboard = useOnDashboard()
   const [toastGone, setToastGone] = useState(0)
   const dark = useDark()
 
@@ -377,6 +382,7 @@ export function App() {
     if (m.id === s.rec?.meta.id) await s.flush()
     const { readings, events } = await db.loadSession(m.id)
     setViewing({ meta: m, series: seriesFrom(m.start, readings, events) })
+    setTab('live')
     scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -399,45 +405,56 @@ export function App() {
   const live = s.conn === 'connected' && !s.stale
   const baseline = lastBaseline(s.live.events)
   const connClass = s.stale ? 'stale' : s.conn
+  // The live graph only appears during a capture; a saved session always shows its graph.
+  const showChart = !!viewing || (connected && s.device.state === 'capturing')
 
+  if (!onDashboard) return <Landing />
+  if (!s.userReady) return null
+  if (!s.user) return null
   if (inPulmoverse) return <Pulmoverse onBack={() => setInPulmoverse(false)} />
 
   return (
     <>
+      <video className="bg-video" autoPlay muted loop playsInline aria-hidden="true">
+        <source src="/309619_medium.mp4" type="video/mp4" />
+      </video>
+      <div className="bg-shade" />
       <header className="top">
         <div className="brand">
           <Logo />
           <div>
             <h1>PulmoSense</h1>
-            <span className="muted small">breath sensor logger</span>
           </div>
         </div>
         <div className="connect">
-          <button className="verse-link" onClick={() => setInPulmoverse(true)}>Dive into PULMOVERSE <span>↗</span></button>
           <span className={`pill conn ${connClass}`} role="status"><i />{s.stale ? 'No data for 3 s' : CONN_LABEL[s.conn]}</span>
-          {!s.demo && (
-            <label className="addr">
-              <span className="sr-only">Device address</span>
-              <input value={s.url} onChange={(e) => s.setUrl(e.target.value)} disabled={connected} spellCheck={false} />
-            </label>
-          )}
+          {s.demo && <span className="sim-tag">Demo mode</span>}
           <button className="primary" onClick={() => (connected ? s.disconnect() : s.connect())}>
-            {connected ? 'Disconnect' : 'Connect'}
+            {connected ? 'Disconnect' : s.demo ? 'Start demo' : 'Connect'}
           </button>
-          <label className="switch">
-            <input type="checkbox" role="switch" checked={s.demo} onChange={(e) => void s.setDemo(e.target.checked)} />
-            <span>Demo mode</span>
-          </label>
-          {s.demo && <span className="sim-tag">Simulated data</span>}
+          <button className="verse-link" onClick={() => { location.hash = '' }}>Home</button>
+          <button className="verse-link" onClick={() => setInPulmoverse(true)}>PULMOVERSE <span>↗</span></button>
+          <button onClick={() => setSettingsOpen(true)} aria-haspopup="dialog">⚙ Settings</button>
         </div>
       </header>
 
       {s.notice && <p className="notice" role="alert">{s.notice}</p>}
 
+      <nav className="tabs" aria-label="Sections">
+        <span className="seg">
+          <button aria-pressed={tab === 'live'} onClick={() => setTab('live')}>Live</button>
+          <button aria-pressed={tab === 'records'} onClick={() => setTab('records')}>Records <span className="muted">({s.sessions.length})</span></button>
+        </span>
+      </nav>
+
+      {tab === 'live' && <>
       {!viewing && connected && s.device.state && <Journey demo={s.demo} />}
 
       <main className="layout">
-        <section className="card plot">
+        {!showChart && !(connected && s.device.state) && (
+          <section className="card plot"><div className="plot-area solo"><Onboarding onSettings={() => setSettingsOpen(true)} /></div></section>
+        )}
+        {showChart && <section className="card plot">
           <div className="toolbar">
             {viewing ? (
               <>
@@ -477,7 +494,7 @@ export function App() {
               zoomable={!!viewing}
             />
           </div>
-        </section>
+        </section>}
 
         <aside className="side">
           <section className="card">
@@ -490,12 +507,19 @@ export function App() {
                     <b>{SENSOR_LABEL[k]}</b>
                     <span className="muted small">{SENSOR_HINT[k]}</span>
                   </div>
-                  <div className="big">{live && s.last ? s.last[k].toFixed(3) : '-.---'}<small> V</small></div>
-                  <div className="muted small mono">
-                    {baseline
-                      ? `baseline ${baseline.v[k].toFixed(3)} V${live && s.last ? ` · ×${(s.last[k] / baseline.v[k]).toFixed(2)}` : ''}`
-                      : 'baseline not taken yet'}
-                  </div>
+                  {(() => {
+                    const ppm = live && s.last && baseline ? estimatePpm(k, s.last[k], s.last[k] / baseline.v[k]) : null
+                    return (
+                      <>
+                        <div className="big">{ppm != null ? fmtPpm(ppm) : live && s.last ? s.last[k].toFixed(3) : '-.---'}<small> {ppm != null ? `ppm ${PPM_GAS[k]}` : 'V'}</small></div>
+                        <div className="muted small mono">
+                          {baseline
+                            ? `${live && s.last ? `${s.last[k].toFixed(3)} V · ` : ''}baseline ${baseline.v[k].toFixed(3)} V${live && s.last ? ` · ×${(s.last[k] / baseline.v[k]).toFixed(2)}` : ''}`
+                            : 'ppm shows once the baseline is taken'}
+                        </div>
+                      </>
+                    )
+                  })()}
                 </div>
               ))}
             </div>
@@ -525,7 +549,9 @@ export function App() {
         <CaptureTable series={series} caps={caps} />
         <CompareChart caps={caps} />
       </section>
+      </>}
 
+      {tab === 'records' && <>
       <section className="card block">
         <h2>Sessions</h2>
         <SessionList
@@ -539,6 +565,11 @@ export function App() {
         />
       </section>
 
+      <section className="card block">
+        <h2>History</h2>
+        <History sessions={s.sessions} />
+      </section>
+
       <details className="card block log">
         <summary>Device log <span className="muted">({s.log.length})</span></summary>
         <ol>
@@ -547,16 +578,11 @@ export function App() {
           ))}
         </ol>
       </details>
+      </>}
 
-      {s.result && !viewing && (
-        <div className="modal-back" onClick={() => s.dismissResult()}>
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="res-title" onClick={(e) => e.stopPropagation()}>
-            <h2 id="res-title">Capture {s.result.n} complete</h2>
-            <p>{s.result.text}</p>
-            <button className="primary" autoFocus onClick={() => s.dismissResult()}>OK</button>
-          </div>
-        </div>
-      )}
+      {settingsOpen && <Settings connected={connected} onClose={() => setSettingsOpen(false)} />}
+
+      {s.result && !viewing && <Result {...s.result} onClose={() => s.dismissResult()} />}
 
       {s.toast.id > toastGone && s.toast.text && (
         <div className="toast" role="status" key={s.toast.id}>{s.toast.text}</div>

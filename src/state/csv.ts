@@ -1,4 +1,4 @@
-import { describeRatio, SENSORS, SENSOR_LABEL } from '../config'
+import { describeRatio, estimatePpm, fmtPpm, SENSORS, SENSOR_LABEL } from '../config'
 import type { SessionMeta } from './db'
 import { captures, type Event, type Reading } from './series'
 
@@ -30,10 +30,10 @@ export function readingsCsv(m: SessionMeta, readings: Reading[], events: Event[]
 }
 
 export function capturesCsv(m: SessionMeta, events: Event[]) {
-  const rows: (string | number)[][] = [['capture', 'iso_time', 'sensor', 'volts', 'ratio_vs_baseline', 'descriptor', 'source']]
+  const rows: (string | number)[][] = [['capture', 'iso_time', 'sensor', 'volts', 'est_ppm', 'ratio_vs_baseline', 'descriptor', 'source']]
   for (const c of captures(events))
     for (const k of SENSORS)
-      rows.push([c.n, new Date(c.t).toISOString(), SENSOR_LABEL[k], c.v[k].toFixed(3), c.ratio[k].toFixed(3), describeRatio(c.ratio[k]), m.source])
+      rows.push([c.n, new Date(c.t).toISOString(), SENSOR_LABEL[k], c.v[k].toFixed(3), fmtPpm(estimatePpm(k, c.v[k], c.ratio[k])), c.ratio[k].toFixed(3), describeRatio(c.ratio[k]), m.source])
   return toCsv(rows)
 }
 

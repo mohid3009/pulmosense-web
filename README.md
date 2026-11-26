@@ -19,6 +19,8 @@ Open the URL Vite prints (http://localhost:5173). The dev server also listens on
 
 After its intro animation the device joins WiFi, then shows **WAITING** on its OLED with the network name and IP. It stays there until the dashboard connects (or you press its button to skip), so warm-up starts when you are watching.
 
+Enter the device address under **Settings** (the gear button at the top right), then press **Connect**. You can save addresses with a name per profile and pick them again later.
+
 **Shared WiFi (firmware default).** Set `WIFI_SSID` / `WIFI_PASSWORD` in the firmware (2.4 GHz only). Put the laptop on the same network and enter `ws://<IP from the OLED>:81`, or try `ws://pulmosense.local:81` (mDNS does not work on every device). If joining fails within 20 s the device falls back to its own network.
 
 **Device's own network.** Set `USE_OWN_NETWORK = true` (or let the fallback kick in). Join `PulmoSense` (password `pulmosense1`) from the laptop and use `ws://192.168.4.1:81`. The laptop loses internet while joined; the app works offline once loaded, so start `npm run dev` (or open the page) first if you need to.

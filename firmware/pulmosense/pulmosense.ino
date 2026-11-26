@@ -63,7 +63,10 @@ const uint32_t HOLD_HINT_MS  = 1000;               // show the "hold to restart"
 const uint32_t LONG_PRESS_MS = 3000;               // hold this long to restart warm-up
 const uint32_t DONE_UI_MS  = 10000;                // how long the result screen stays after a capture
 const uint32_t FRAME_MS    = 100;                  // OLED refresh interval
-const float    RATIO_HIGH  = 1.1f;                 // same cut-off as the dashboard (src/config.ts)
+const float    RATIO_HIGH  = 1.1f;                 // result levels: same cut-offs as the dashboard (src/config.ts)
+const float    RATIO_MID   = 1.3f;
+const float    RATIO_TOP   = 1.6f;
+const float    NOISE_V     = 0.03f;                // a sensor must move this far from baseline to count (src/config.ts NOISE_V)
 
 // ---------- Types and state (types must come before any function) ----------
 enum State { WARMUP, BASELINE, READY, CAPTURING };
@@ -78,7 +81,7 @@ bool oledOk = false;
 
 float  latest[3]    = {0, 0, 0};
 float  baseline[3]  = {0, 0, 0};
-bool   lastMild     = false;                       // last capture: any ratio above RATIO_HIGH
+int    lastLevel    = 0;                           // last capture: 0 normal, 1 mild, 2 noticeable, 3 well above
 bool   hasBaseline  = false;
 double acc[3]       = {0, 0, 0};
 int    accN         = 0;
@@ -285,21 +288,28 @@ void drawState(uint32_t now) {
 
   if (state == READY && showingDone(now)) {        // friendly result: a face and a kind message, no numbers
     header("DONE");
-    int bob = (int)(2 * sinf(now / 200.0f));       // face bobs happily
+    int bob = (int)(2 * sinf(now / 200.0f));       // face bobs gently
     int cx = 96, cy = 36 + bob;
     oled.drawCircle(cx, cy, 15, SSD1306_WHITE);
     oled.fillCircle(cx - 5, cy - 4, 2, SSD1306_WHITE);
-    if (lastMild) oled.drawFastHLine(cx + 3, cy - 4, 5, SSD1306_WHITE);   // gentle wink
+    if (lastLevel == 1) oled.drawFastHLine(cx + 3, cy - 4, 5, SSD1306_WHITE);   // gentle wink
     else oled.fillCircle(cx + 5, cy - 4, 2, SSD1306_WHITE);
-    for (int dx = -7; dx <= 7; dx++) oled.drawPixel(cx + dx, cy + 8 - (dx * dx) / 12, SSD1306_WHITE);   // smile: ends higher than the middle
+    if (lastLevel <= 1) {
+      for (int dx = -7; dx <= 7; dx++) oled.drawPixel(cx + dx, cy + 8 - (dx * dx) / 12, SSD1306_WHITE);   // smile
+    } else {
+      oled.drawFastHLine(cx - 6, cy + 6, 13, SSD1306_WHITE);                    // calm, flat mouth
+    }
+    const char* head[4] = {"Great!", "Nice!", "Hmm...", "Heads up"};
+    const char* l1[4]   = {"Your breath looks", "A little change,", "A bit higher than", "Well above usual."};
+    const char* l2[4]   = {"fresh and calm", "totally normal", "usual. Try fresh air", "Retry in fresh air"};
     oled.setTextSize(2);
     oled.setCursor(0, 16);
-    oled.print(lastMild ? "Nice!" : "Great!");
+    oled.print(head[lastLevel]);
     oled.setTextSize(1);
     oled.setCursor(0, 38);
-    oled.print(lastMild ? "A little change," : "Your breath looks");
+    oled.print(l1[lastLevel]);
     oled.setCursor(0, 48);
-    oled.print(lastMild ? "totally normal" : "fresh and calm");
+    oled.print(l2[lastLevel]);
     return;
   }
 
@@ -501,8 +511,17 @@ void finishCapture() {
     avg[i]   = accN ? (float)(acc[i] / accN) : latest[i];
     ratio[i] = (baseline[i] > 0.01f) ? avg[i] / baseline[i] : 0;
   }
-  lastMild = false;
-  for (int i = 0; i < 3; i++) if (ratio[i] > RATIO_HIGH) lastMild = true;
+  // Same judgement as the dashboard (captureLevel in src/config.ts): ignore sensors that moved less than
+  // NOISE_V from baseline, and the top level needs two sensors above RATIO_HIGH.
+  float top = 0;
+  int above = 0;
+  for (int i = 0; i < 3; i++) {
+    bool real = ratio[i] > 0 && fabsf(avg[i] - baseline[i]) >= NOISE_V;
+    if (real && ratio[i] > top) top = ratio[i];
+    if (real && ratio[i] > RATIO_HIGH) above++;
+  }
+  lastLevel = top > RATIO_TOP ? 3 : top > RATIO_MID ? 2 : top > RATIO_HIGH ? 1 : 0;
+  if (lastLevel == 3 && above < 2) lastLevel = 2;
   captureCount++;
   Serial.println("SAMPLE,sensor,volts,ratio_vs_baseline");
   for (int i = 0; i < 3; i++) Serial.printf("SAMPLE,%s,%.3f,%.2f\n", NAMES[i], avg[i], ratio[i]);

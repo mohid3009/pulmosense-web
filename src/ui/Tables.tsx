@@ -1,4 +1,4 @@
-import { CAPTURE_S, describeRatio, SENSORS, SENSOR_LABEL, summarizeCapture } from '../config'
+import { captureLevel, CAPTURE_S, describeRatio, estimatePpm, fmtPpm, PPM_GAS, SENSORS, SENSOR_LABEL, summarizeCapture } from '../config'
 import type { SessionMeta } from '../state/db'
 import type { Capture, Series } from '../state/series'
 import { clock, mmss } from './format'
@@ -14,11 +14,11 @@ export function CaptureTable({ series, caps }: { series: Series; caps: Capture[]
   const last = caps[caps.length - 1]
   return (
     <>
-    <p className="capture-summary" role="status">Capture {last.n}: {summarizeCapture(SENSORS.map((k) => last.ratio[k]))}</p>
+    <p className={`capture-summary lvl-${captureLevel(SENSORS.map((k) => last.ratio[k]), SENSORS.map((k) => last.v[k]))}`} role="status">Capture {last.n}: {summarizeCapture(SENSORS.map((k) => last.ratio[k]), SENSORS.map((k) => last.v[k]))}</p>
     <table className="data">
       <thead>
         <tr>
-          <th>Capture</th><th>Time</th><th>Sensor</th><th className="num">Volts ({CAPTURE_S} s avg)</th><th className="num">Ratio vs baseline</th><th>Descriptor</th>
+          <th>Capture</th><th>Time</th><th>Sensor</th><th className="num">Est. ppm</th><th className="num">Volts ({CAPTURE_S} s avg)</th><th className="num">Ratio vs baseline</th><th>Descriptor</th>
         </tr>
       </thead>
       <tbody>
@@ -27,7 +27,8 @@ export function CaptureTable({ series, caps }: { series: Series; caps: Capture[]
             <tr key={`${c.t}-${k}`} className={i === 0 ? 'group' : undefined}>
               <td className="num">{i === 0 ? c.n : ''}</td>
               <td className="num">{i === 0 ? `${mmss((c.t - series.t0) / 1000)} (${clock(c.t)})` : ''}</td>
-              <td>{SENSOR_LABEL[k]}</td>
+              <td>{SENSOR_LABEL[k]} <span className="muted small">{PPM_GAS[k]}</span></td>
+              <td className="num">{fmtPpm(estimatePpm(k, c.v[k], c.ratio[k]))}</td>
               <td className="num">{c.v[k].toFixed(3)}</td>
               <td className="num">{c.ratio[k].toFixed(3)}</td>
               <td><Descriptor r={c.ratio[k]} /></td>
@@ -115,7 +116,7 @@ export function SessionList({ sessions, activeId, viewingId, onOpen, onRename, o
             </td>
             <td className="num">{new Date(m.start).toLocaleString()}</td>
             <td className="num">{m.id === activeId ? 'recording' : dur(m.end - m.start)}</td>
-            <td>{m.source === 'simulated' ? <span className="sim-tag">Simulated data</span> : <span className="tag">device</span>}</td>
+            <td>{m.source === 'simulated' ? <span className="sim-tag">Simulated data</span> : <span className="tag">{m.deviceName ?? 'device'}</span>}</td>
             <td className="actions">
               <button onClick={() => onOpen(m)}>Open</button>
               <button onClick={() => onExport(m, 'readings')}>Export CSV</button>
